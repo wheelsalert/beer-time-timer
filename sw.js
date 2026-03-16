@@ -1,16 +1,15 @@
 // Countdown to Beer Time — Service Worker
-// v1.0.0 — 16 Mar 2026
+// v2.1.0 — 16 Mar 2026
 
-const CACHE_NAME = 'beer-time-v1';
+const CACHE_NAME = 'beer-time-v2';
 const ASSETS = [
-  './countdown-to-beer-time.html',
+  './index.html',
   './manifest.json',
   './icon-192.png',
   './icon-512.png',
   './icon-180.png',
 ];
 
-// Install: cache all assets
 self.addEventListener('install', function(event) {
   event.waitUntil(
     caches.open(CACHE_NAME).then(function(cache) {
@@ -20,7 +19,6 @@ self.addEventListener('install', function(event) {
   self.skipWaiting();
 });
 
-// Activate: clear old caches
 self.addEventListener('activate', function(event) {
   event.waitUntil(
     caches.keys().then(function(keys) {
@@ -33,7 +31,6 @@ self.addEventListener('activate', function(event) {
   self.clients.claim();
 });
 
-// Fetch: serve from cache, fall back to network
 self.addEventListener('fetch', function(event) {
   event.respondWith(
     caches.match(event.request).then(function(cached) {

@@ -2,7 +2,7 @@
   "name": "Countdown to Beer Time",
   "short_name": "Beer Time",
   "description": "Hockey beer league countdown timer",
-  "start_url": "./countdown-to-beer-time.html",
+  "start_url": "./index.html",
   "display": "standalone",
   "orientation": "portrait",
   "background_color": "#1a3a5c",
