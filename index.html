@@ -411,7 +411,7 @@
 
   <div class="footer-bar">
     <div class="version-info">
-      <span class="version-badge" id="ver-badge">v2.0.0</span>
+      <span class="version-badge" id="ver-badge">v2.1.0</span>
       <span class="version-date" id="ver-date">16 Mar 2026</span>
     </div>
     <button class="changelog-btn" id="changelog-btn">CHANGELOG</button>
@@ -437,14 +437,27 @@
 // ══════════════════════════════════════════════
 // VERSION & CHANGELOG
 // ══════════════════════════════════════════════
-var APP_VERSION = 'v2.0.0';
+var APP_VERSION = 'v2.1.0';
 var APP_DATE    = '16 Mar 2026';
 
 var CHANGELOG = [
   {
+    version: 'v2.1.0',
+    date:    '25 Mar 2026',
+    tag:     'latest',
+    changes: [
+      'Fixed: audio silent on iOS — AudioContext now created inside user gesture only',
+      'Fixed: pre-scheduled end-beeps now cancelled immediately on RESET',
+      'Fixed: AudioContext in bad state is closed and recreated fresh on RESET',
+      'Fixed: done/danger CSS classes cleared before updateClock() on RESET to prevent visual glitch',
+      'Added: stopAllScheduledAudio() to cancel pending Web Audio nodes',
+      'Added: loadDefaultBeep() called lazily on first play, not at page load',
+    ]
+  },
+  {
     version: 'v2.0.0',
     date:    '16 Mar 2026',
-    tag:     'latest',
+    tag:     'release',
     changes: [
       'PWA support added — install to iOS and Android home screen',
       'manifest.json: app name, icons, standalone display, navy theme colour',
@@ -721,63 +734,115 @@ repsInput.addEventListener('input', function() {
 // ══════════════════════════════════════════════
 // AUDIO
 // ══════════════════════════════════════════════
+
+// Track all scheduled source nodes so we can cancel them on RESET
+var scheduledSources = [];
+
+// FIX: Only create AudioContext inside a user-gesture handler.
+// Calling this outside a gesture (e.g. at page load) puts iOS Safari
+// into a permanently suspended state that cannot be recovered.
 function getAudioCtx() {
-  if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
-  if (audioCtx.state === 'suspended') audioCtx.resume();
+  if (!audioCtx || audioCtx.state === 'closed') {
+    audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+  }
+  if (audioCtx.state === 'suspended') {
+    audioCtx.resume().catch(function() {});
+  }
   return audioCtx;
 }
 
+// FIX: Load default beep lazily — only after AudioContext exists from
+// a user gesture. Safe to call multiple times; skips if already loaded.
 function loadDefaultBeep() {
+  if (defaultAudioBuffer) return;  // already loaded
+  if (!audioCtx || audioCtx.state === 'closed') return;  // no context yet
   try {
-    var ctx = getAudioCtx();
     var buf = b64ToArrayBuffer(DEFAULT_BEEP_B64);
-    ctx.decodeAudioData(buf, function(decoded) {
+    audioCtx.decodeAudioData(buf, function(decoded) {
       defaultAudioBuffer = decoded;
+    }, function(err) {
+      console.warn('Could not decode embedded beep:', err);
     });
   } catch(e) {
-    console.warn('Could not decode embedded beep', e);
+    console.warn('loadDefaultBeep error:', e);
   }
 }
 
 function playSynthBeep(startTime, ctx) {
-  var osc  = ctx.createOscillator();
-  var gain = ctx.createGain();
-  osc.connect(gain);
-  gain.connect(ctx.destination);
-  osc.type = 'sine';
-  osc.frequency.setValueAtTime(880, startTime);
-  osc.frequency.exponentialRampToValueAtTime(660, startTime + 0.08);
-  gain.gain.setValueAtTime(0, startTime);
-  gain.gain.linearRampToValueAtTime(0.55, startTime + 0.01);
-  gain.gain.exponentialRampToValueAtTime(0.001, startTime + 0.18);
-  osc.start(startTime);
-  osc.stop(startTime + 0.2);
+  try {
+    var osc  = ctx.createOscillator();
+    var gain = ctx.createGain();
+    osc.connect(gain);
+    gain.connect(ctx.destination);
+    osc.type = 'sine';
+    osc.frequency.setValueAtTime(880, startTime);
+    osc.frequency.exponentialRampToValueAtTime(660, startTime + 0.08);
+    gain.gain.setValueAtTime(0, startTime);
+    gain.gain.linearRampToValueAtTime(0.55, startTime + 0.01);
+    gain.gain.exponentialRampToValueAtTime(0.001, startTime + 0.18);
+    osc.start(startTime);
+    osc.stop(startTime + 0.2);
+    // Track for cancellation
+    scheduledSources.push(osc);
+    osc.onended = function() {
+      scheduledSources = scheduledSources.filter(function(s) { return s !== osc; });
+    };
+  } catch(e) {
+    console.warn('playSynthBeep error:', e);
+  }
 }
 
 function playBufferBeep(buffer, startTime, ctx) {
-  var src = ctx.createBufferSource();
-  src.buffer = buffer;
-  src.connect(ctx.destination);
-  src.start(startTime);
+  try {
+    var src = ctx.createBufferSource();
+    src.buffer = buffer;
+    src.connect(ctx.destination);
+    src.start(startTime);
+    // Track for cancellation (FIX: allows RESET to silence pending beeps)
+    scheduledSources.push(src);
+    src.onended = function() {
+      scheduledSources = scheduledSources.filter(function(s) { return s !== src; });
+    };
+  } catch(e) {
+    console.warn('playBufferBeep error:', e);
+  }
+}
+
+// Stop and clear all pre-scheduled audio nodes immediately
+function stopAllScheduledAudio() {
+  scheduledSources.forEach(function(src) {
+    try { src.stop(0); } catch(e) {}
+  });
+  scheduledSources = [];
 }
 
 function playBeepOnce(delay) {
   if (!audioEnabled.checked) return;
-  var ctx    = getAudioCtx();
-  var buffer = customAudioBuffer || defaultAudioBuffer;
-  var t      = ctx.currentTime + (delay || 0);
-  if (buffer) { playBufferBeep(buffer, t, ctx); }
-  else        { playSynthBeep(t, ctx); }
+  try {
+    var ctx = getAudioCtx();
+    loadDefaultBeep();  // no-op if already loaded
+    var buffer = customAudioBuffer || defaultAudioBuffer;
+    var t = ctx.currentTime + (delay || 0);
+    if (buffer) { playBufferBeep(buffer, t, ctx); }
+    else        { playSynthBeep(t, ctx); }
+  } catch(e) {
+    console.warn('playBeepOnce error:', e);
+  }
 }
 
 function playBeepMulti(count, delay, interval) {
   if (!audioEnabled.checked) return;
-  var ctx    = getAudioCtx();
-  var buffer = customAudioBuffer || defaultAudioBuffer;
-  for (var i = 0; i < count; i++) {
-    var t = ctx.currentTime + (delay || 0) + i * (interval || 0.9);
-    if (buffer) { playBufferBeep(buffer, t, ctx); }
-    else        { playSynthBeep(t, ctx); }
+  try {
+    var ctx = getAudioCtx();
+    loadDefaultBeep();  // no-op if already loaded
+    var buffer = customAudioBuffer || defaultAudioBuffer;
+    for (var i = 0; i < count; i++) {
+      var t = ctx.currentTime + (delay || 0) + i * (interval || 1.0);
+      if (buffer) { playBufferBeep(buffer, t, ctx); }
+      else        { playSynthBeep(t, ctx); }
+    }
+  } catch(e) {
+    console.warn('playBeepMulti error:', e);
   }
 }
 
@@ -1015,8 +1080,23 @@ btnPause.addEventListener('click', function() {
 });
 
 btnReset.addEventListener('click', function() {
+  // Stop the interval immediately
   clearInterval(timerId);
-  timerId              = null;
+  timerId = null;
+
+  // FIX: Cancel any beeps that are pre-scheduled but haven't fired yet
+  stopAllScheduledAudio();
+
+  // FIX: If AudioContext is in a bad state, close it so it gets
+  // recreated fresh on the next START press
+  if (audioCtx && audioCtx.state === 'suspended') {
+    audioCtx.close().catch(function() {});
+    audioCtx          = null;
+    defaultAudioBuffer = null;
+    // Note: customAudioBuffer is kept so user doesn't need to re-upload
+  }
+
+  // Reset all state
   isRunning            = false;
   isPaused             = false;
   isDone               = false;
@@ -1030,14 +1110,17 @@ btnReset.addEventListener('click', function() {
   repsErr.textContent    = '';
   secondsInput.classList.remove('input-error');
   repsInput.classList.remove('input-error');
+
+  // FIX: Remove visual classes BEFORE updateClock so no frame glitch
+  clockEl.classList.remove('danger', 'done');
+  progressBar.classList.remove('danger-bar');
+
   releaseWakeLock();
   setInputsEditable(true);
   updateClock();
   updateButtons();
   buildRepDots();
   setStatus('READY — SET DURATION AND PRESS START');
-  clockEl.classList.remove('danger', 'done');
-  progressBar.classList.remove('danger-bar');
   progressBar.style.width = '100%';
 });
 
@@ -1056,7 +1139,9 @@ function init() {
   buildRepDots();
   updateButtons();
   setInputsEditable(true);
-  loadDefaultBeep();
+  // FIX: Do NOT call loadDefaultBeep() here.
+  // AudioContext must be created inside a user gesture (START click).
+  // loadDefaultBeep() is called lazily inside playBeepOnce/playBeepMulti.
 }
 
 init();
