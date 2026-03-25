@@ -411,7 +411,7 @@
 
   <div class="footer-bar">
     <div class="version-info">
-      <span class="version-badge" id="ver-badge">v2.1.0</span>
+      <span class="version-badge" id="ver-badge">v2.2.0</span>
       <span class="version-date" id="ver-date">16 Mar 2026</span>
     </div>
     <button class="changelog-btn" id="changelog-btn">CHANGELOG</button>
@@ -437,14 +437,24 @@
 // ══════════════════════════════════════════════
 // VERSION & CHANGELOG
 // ══════════════════════════════════════════════
-var APP_VERSION = 'v2.1.0';
+var APP_VERSION = 'v2.2.0';
 var APP_DATE    = '16 Mar 2026';
 
 var CHANGELOG = [
   {
-    version: 'v2.1.0',
+    version: 'v2.2.0',
     date:    '25 Mar 2026',
     tag:     'latest',
+    changes: [
+      'Fixed: first beep played wrong sound (synth instead of buzz MP3)',
+      'Root cause: async race condition — decodeAudioData not finished before first play',
+      'Fix: loadDefaultBeep() now returns a Promise; play functions wait for it to resolve',
+    ]
+  },
+  {
+    version: 'v2.1.0',
+    date:    '25 Mar 2026',
+    tag:     'release',
     changes: [
       'Fixed: audio silent on iOS — AudioContext now created inside user gesture only',
       'Fixed: pre-scheduled end-beeps now cancelled immediately on RESET',
@@ -753,19 +763,27 @@ function getAudioCtx() {
 
 // FIX: Load default beep lazily — only after AudioContext exists from
 // a user gesture. Safe to call multiple times; skips if already loaded.
+// FIX: Returns a Promise so callers can wait for decode to finish
+// before playing. On first call this takes a few ms; subsequent calls
+// resolve immediately because defaultAudioBuffer is already set.
 function loadDefaultBeep() {
-  if (defaultAudioBuffer) return;  // already loaded
-  if (!audioCtx || audioCtx.state === 'closed') return;  // no context yet
-  try {
-    var buf = b64ToArrayBuffer(DEFAULT_BEEP_B64);
-    audioCtx.decodeAudioData(buf, function(decoded) {
-      defaultAudioBuffer = decoded;
-    }, function(err) {
-      console.warn('Could not decode embedded beep:', err);
-    });
-  } catch(e) {
-    console.warn('loadDefaultBeep error:', e);
-  }
+  if (defaultAudioBuffer) return Promise.resolve(defaultAudioBuffer);
+  if (!audioCtx || audioCtx.state === 'closed') return Promise.resolve(null);
+  return new Promise(function(resolve) {
+    try {
+      var buf = b64ToArrayBuffer(DEFAULT_BEEP_B64);
+      audioCtx.decodeAudioData(buf, function(decoded) {
+        defaultAudioBuffer = decoded;
+        resolve(decoded);
+      }, function(err) {
+        console.warn('Could not decode embedded beep:', err);
+        resolve(null);  // fall back to synth on decode error
+      });
+    } catch(e) {
+      console.warn('loadDefaultBeep error:', e);
+      resolve(null);
+    }
+  });
 }
 
 function playSynthBeep(startTime, ctx) {
@@ -820,11 +838,13 @@ function playBeepOnce(delay) {
   if (!audioEnabled.checked) return;
   try {
     var ctx = getAudioCtx();
-    loadDefaultBeep();  // no-op if already loaded
-    var buffer = customAudioBuffer || defaultAudioBuffer;
-    var t = ctx.currentTime + (delay || 0);
-    if (buffer) { playBufferBeep(buffer, t, ctx); }
-    else        { playSynthBeep(t, ctx); }
+    // FIX: wait for decode to finish before reading defaultAudioBuffer
+    loadDefaultBeep().then(function() {
+      var buffer = customAudioBuffer || defaultAudioBuffer;
+      var t = ctx.currentTime + (delay || 0);
+      if (buffer) { playBufferBeep(buffer, t, ctx); }
+      else        { playSynthBeep(t, ctx); }
+    });
   } catch(e) {
     console.warn('playBeepOnce error:', e);
   }
@@ -834,13 +854,15 @@ function playBeepMulti(count, delay, interval) {
   if (!audioEnabled.checked) return;
   try {
     var ctx = getAudioCtx();
-    loadDefaultBeep();  // no-op if already loaded
-    var buffer = customAudioBuffer || defaultAudioBuffer;
-    for (var i = 0; i < count; i++) {
-      var t = ctx.currentTime + (delay || 0) + i * (interval || 1.0);
-      if (buffer) { playBufferBeep(buffer, t, ctx); }
-      else        { playSynthBeep(t, ctx); }
-    }
+    // FIX: wait for decode to finish before reading defaultAudioBuffer
+    loadDefaultBeep().then(function() {
+      var buffer = customAudioBuffer || defaultAudioBuffer;
+      for (var i = 0; i < count; i++) {
+        var t = ctx.currentTime + (delay || 0) + i * (interval || 1.0);
+        if (buffer) { playBufferBeep(buffer, t, ctx); }
+        else        { playSynthBeep(t, ctx); }
+      }
+    });
   } catch(e) {
     console.warn('playBeepMulti error:', e);
   }
